@@ -45,8 +45,10 @@ bun yt_live_link_saver.js --env-file .env --loop --interval-seconds 3600 --quiet
 Example (runs at minute 0 every hour):
 
 ```cron
-0 * * * * /path/to/bun /path/to/youtube-stream-grabber/yt_live_link_saver.js --env-file /path/to/youtube-stream-grabber/.env --quiet
+0 * * * * /root/.bun/bin/bun /path/to/youtube-stream-grabber/yt_live_link_saver.js --env-file /path/to/youtube-stream-grabber/.env --quiet
 ```
+
+Cron usually has a minimal `PATH`, so use the full Bun path (get it with `command -v bun`).
 
 ## Notes
 
