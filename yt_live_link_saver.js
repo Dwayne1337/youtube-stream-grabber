@@ -46,6 +46,40 @@ function getEnvInt(name) {
   return Number.parseInt(trimmed, 10);
 }
 
+function splitCommaWhitespaceList(value) {
+  if (value === null || value === undefined) return [];
+  return String(value)
+    .split(/[,\s]+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function uniqueStrings(values) {
+  const seen = new Set();
+  const out = [];
+  for (const value of values) {
+    const trimmed = String(value || "").trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+function getChannelInputs(args) {
+  const fromArgs = Array.isArray(args.channels) ? args.channels : [];
+  if (fromArgs.length) {
+    const flattened = [];
+    for (const raw of fromArgs) flattened.push(...splitCommaWhitespaceList(raw));
+    return uniqueStrings(flattened);
+  }
+
+  const rawFromEnv = process.env.YOUTUBE_CHANNELS;
+  return uniqueStrings(splitCommaWhitespaceList(rawFromEnv));
+}
+
 function formatYouTubeError(statusCode, bodyText) {
   let data;
   try {
@@ -286,9 +320,9 @@ function printHelp() {
     "",
     "Options:",
     "  --api-key <key>            YouTube Data API v3 key (or set YOUTUBE_API_KEY)",
-    "  --channel <id|url|@handle> Channel ID (UC...), channel URL, or @handle (or set YOUTUBE_CHANNEL)",
+    "  --channels <list>          Channels to check (repeatable; comma-separated): @handle, UC..., or channel URL (or set YOUTUBE_CHANNELS)",
     `  --output <path>            Output file path (or set YOUTUBE_OUTPUT, default: ${DEFAULT_OUTPUT_FILE})`,
-    "  --env-file <path>          Optional .env file with YOUTUBE_API_KEY/YOUTUBE_CHANNEL/YOUTUBE_OUTPUT/YOUTUBE_INTERVAL_SECONDS",
+    "  --env-file <path>          Optional .env file with YOUTUBE_API_KEY, YOUTUBE_CHANNELS, YOUTUBE_OUTPUT, YOUTUBE_INTERVAL_SECONDS",
     "  --max-results <n>          Max number of simultaneous live videos to save (default: 5)",
     "  --timeout-seconds <n>      HTTP timeout in seconds (default: 10)",
     "  --with-timestamp           Prefix saved lines with an ISO timestamp and a tab",
@@ -303,7 +337,7 @@ function printHelp() {
 function parseArgs(argv) {
   const args = {
     apiKey: null,
-    channel: null,
+    channels: [],
     output: null,
     envFile: null,
     maxResults: 5,
@@ -348,9 +382,9 @@ function parseArgs(argv) {
       i = out.nextIndex;
       continue;
     }
-    if (arg === "--channel" || arg.startsWith("--channel=")) {
+    if (arg === "--channels" || arg.startsWith("--channels=")) {
       const out = takeValue(arg, i);
-      args.channel = out.value;
+      args.channels.push(out.value);
       i = out.nextIndex;
       continue;
     }
@@ -399,29 +433,43 @@ function parseArgs(argv) {
 
 async function runOnce(args) {
   const apiKey = args.apiKey || process.env.YOUTUBE_API_KEY;
-  const channelInput = args.channel || process.env.YOUTUBE_CHANNEL;
+  const channelInputs = getChannelInputs(args);
   const outputPath = args.output || process.env.YOUTUBE_OUTPUT || DEFAULT_OUTPUT_FILE;
 
   if (!apiKey) {
     console.error("Missing API key. Pass --api-key or set YOUTUBE_API_KEY.");
     return 2;
   }
-  if (!channelInput) {
-    console.error("Missing channel. Pass --channel or set YOUTUBE_CHANNEL.");
+  if (!channelInputs.length) {
+    console.error("Missing channels. Pass --channels or set YOUTUBE_CHANNELS.");
     return 2;
   }
 
-  const channelId = await resolveChannelId(apiKey, channelInput, {
-    timeoutSeconds: args.timeoutSeconds,
-  });
-  const liveVideoIds = await fetchLiveVideoIds(apiKey, channelId, {
-    maxResults: args.maxResults,
-    timeoutSeconds: args.timeoutSeconds,
-  });
+  const allLiveVideoIds = new Set();
+  const errors = [];
+  for (const channelInput of channelInputs) {
+    try {
+      const channelId = await resolveChannelId(apiKey, channelInput, {
+        timeoutSeconds: args.timeoutSeconds,
+      });
+      const liveVideoIds = await fetchLiveVideoIds(apiKey, channelId, {
+        maxResults: args.maxResults,
+        timeoutSeconds: args.timeoutSeconds,
+      });
+      for (const id of liveVideoIds) allLiveVideoIds.add(id);
+    } catch (err) {
+      if (channelInputs.length === 1) throw err;
+      const message = err instanceof Error ? err.message : String(err);
+      errors.push(`[${channelInput}] ${message}`);
+    }
+  }
 
+  if (errors.length) console.error(errors.join("\n"));
+
+  const liveVideoIds = Array.from(allLiveVideoIds);
   if (!liveVideoIds.length) {
     if (!args.quiet) console.log("Not live.");
-    return 0;
+    return errors.length ? 1 : 0;
   }
 
   const saved = appendNewLiveLinks(outputPath, liveVideoIds, {
@@ -432,7 +480,7 @@ async function runOnce(args) {
     if (saved.length) console.log(saved.join("\n"));
     else console.log("Live, but link(s) already saved.");
   }
-  return 0;
+  return errors.length ? 1 : 0;
 }
 
 function sleep(ms) {
@@ -494,4 +542,3 @@ main(process.argv.slice(2))
     console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   });
-

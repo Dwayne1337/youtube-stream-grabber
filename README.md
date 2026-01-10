@@ -1,6 +1,6 @@
 # YouTube Live Link Saver
 
-This script checks if a YouTube channel is **currently live**. If it is, it saves the live stream URL to a text file so you can watch it later (even if the VOD becomes unlisted).
+This script checks if one or more YouTube channels are **currently live**. If any are, it saves the live stream URL(s) to a text file so you can watch it later (even if the VOD becomes unlisted).
 
 ## Setup
 
@@ -17,7 +17,7 @@ Create a `.env` file (or copy `example.env`) with:
 
 ```bash
 YOUTUBE_API_KEY=YOUR_KEY_HERE
-YOUTUBE_CHANNEL=@channelhandle_or_UCxxxxxxxxxxxxxxxxxxxxxx
+YOUTUBE_CHANNELS=@channelhandle_or_UCxxxxxxxxxxxxxxxxxxxxxx,@anotherchannel
 YOUTUBE_OUTPUT=saved_live_links.txt
 YOUTUBE_INTERVAL_SECONDS=3600
 ```
@@ -28,7 +28,7 @@ YOUTUBE_INTERVAL_SECONDS=3600
 bun yt_live_link_saver.js --env-file .env --with-timestamp
 ```
 
-If the channel is live, the script appends the link(s) to `saved_live_links.txt`.
+If any channel is live, the script appends the link(s) to `saved_live_links.txt`.
 
 ## Run every hour
 
