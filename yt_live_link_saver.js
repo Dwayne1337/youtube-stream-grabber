@@ -10,6 +10,15 @@ const YOUTUBE_CHANNELS_ENDPOINT = "https://www.googleapis.com/youtube/v3/channel
 const DEFAULT_OUTPUT_FILE = "saved_live_links.txt";
 const DEFAULT_INTERVAL_SECONDS = 3600;
 
+const SCRIPT_DIR = (() => {
+  const candidate =
+    (typeof process.argv[1] === "string" && process.argv[1]) ||
+    (typeof __filename === "string" && __filename) ||
+    "";
+  if (!candidate) return process.cwd();
+  return path.dirname(path.resolve(candidate));
+})();
+
 function stripQuotes(value) {
   const trimmed = value.trim();
   if (
@@ -78,6 +87,13 @@ function getChannelInputs(args) {
 
   const rawFromEnv = process.env.YOUTUBE_CHANNELS;
   return uniqueStrings(splitCommaWhitespaceList(rawFromEnv));
+}
+
+function resolveOutputPath(outputPath) {
+  const raw = String(outputPath || "").trim();
+  if (!raw) return raw;
+  if (path.isAbsolute(raw)) return raw;
+  return path.resolve(SCRIPT_DIR, raw);
 }
 
 function formatYouTubeError(statusCode, bodyText) {
@@ -321,7 +337,7 @@ function printHelp() {
     "Options:",
     "  --api-key <key>            YouTube Data API v3 key (or set YOUTUBE_API_KEY)",
     "  --channels <list>          Channels to check (repeatable; comma-separated): @handle, UC..., or channel URL (or set YOUTUBE_CHANNELS)",
-    `  --output <path>            Output file path (or set YOUTUBE_OUTPUT, default: ${DEFAULT_OUTPUT_FILE})`,
+    `  --output <path>            Output file path (or set YOUTUBE_OUTPUT, default: ${DEFAULT_OUTPUT_FILE}; relative paths save next to this script)`,
     "  --env-file <path>          Optional .env file with YOUTUBE_API_KEY, YOUTUBE_CHANNELS, YOUTUBE_OUTPUT, YOUTUBE_INTERVAL_SECONDS",
     "  --max-results <n>          Max number of simultaneous live videos to save (default: 5)",
     "  --timeout-seconds <n>      HTTP timeout in seconds (default: 10)",
@@ -434,7 +450,8 @@ function parseArgs(argv) {
 async function runOnce(args) {
   const apiKey = args.apiKey || process.env.YOUTUBE_API_KEY;
   const channelInputs = getChannelInputs(args);
-  const outputPath = args.output || process.env.YOUTUBE_OUTPUT || DEFAULT_OUTPUT_FILE;
+  const rawOutputPath = args.output || process.env.YOUTUBE_OUTPUT || DEFAULT_OUTPUT_FILE;
+  const outputPath = resolveOutputPath(rawOutputPath);
 
   if (!apiKey) {
     console.error("Missing API key. Pass --api-key or set YOUTUBE_API_KEY.");
