@@ -20,6 +20,9 @@ YOUTUBE_API_KEY=YOUR_KEY_HERE
 YOUTUBE_CHANNELS=@channelhandle_or_UCxxxxxxxxxxxxxxxxxxxxxx,@anotherchannel
 YOUTUBE_OUTPUT=saved_live_links.txt
 YOUTUBE_INTERVAL_SECONDS=3600
+# Optional (defaults shown)
+# YOUTUBE_SCAN_LATEST=50
+# YOUTUBE_USE_SEARCH=false
 ```
 
 ## Run once
@@ -53,4 +56,4 @@ Cron usually has a minimal `PATH`, so use the full Bun path (get it with `comman
 ## Notes
 
 - If the stream starts and ends between checks, it can be missed. Use a smaller interval if you want.
-- `search.list` uses YouTube API quota; hourly checks are usually fine.
+- By default this avoids `search.list` (very expensive quota). Set `YOUTUBE_USE_SEARCH=true` or pass `--use-search` to use the legacy `search.list` lookup.

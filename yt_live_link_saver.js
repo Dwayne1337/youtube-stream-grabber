@@ -6,9 +6,12 @@ const path = require("node:path");
 
 const YOUTUBE_SEARCH_ENDPOINT = "https://www.googleapis.com/youtube/v3/search";
 const YOUTUBE_CHANNELS_ENDPOINT = "https://www.googleapis.com/youtube/v3/channels";
+const YOUTUBE_PLAYLIST_ITEMS_ENDPOINT = "https://www.googleapis.com/youtube/v3/playlistItems";
+const YOUTUBE_VIDEOS_ENDPOINT = "https://www.googleapis.com/youtube/v3/videos";
 
 const DEFAULT_OUTPUT_FILE = "saved_live_links.txt";
 const DEFAULT_INTERVAL_SECONDS = 3600;
+const DEFAULT_SCAN_LATEST = 50;
 
 const SCRIPT_DIR = (() => {
   const candidate =
@@ -55,6 +58,16 @@ function getEnvInt(name) {
   return Number.parseInt(trimmed, 10);
 }
 
+function getEnvBool(name) {
+  const raw = process.env[name];
+  if (raw === undefined) return null;
+  const trimmed = raw.trim().toLowerCase();
+  if (!trimmed) return null;
+  if (["1", "true", "yes", "y", "on"].includes(trimmed)) return true;
+  if (["0", "false", "no", "n", "off"].includes(trimmed)) return false;
+  throw new Error(`${name} must be a boolean (got ${JSON.stringify(raw)})`);
+}
+
 function splitCommaWhitespaceList(value) {
   if (value === null || value === undefined) return [];
   return String(value)
@@ -72,6 +85,19 @@ function uniqueStrings(values) {
     const key = trimmed.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+function uniqueExactStrings(values) {
+  const seen = new Set();
+  const out = [];
+  for (const value of values) {
+    const trimmed = String(value || "").trim();
+    if (!trimmed) continue;
+    if (seen.has(trimmed)) continue;
+    seen.add(trimmed);
     out.push(trimmed);
   }
   return out;
@@ -197,7 +223,7 @@ async function resolveChannelId(apiKey, channelInput, { timeoutSeconds }) {
     const data = await apiGetJson(
       YOUTUBE_CHANNELS_ENDPOINT,
       {
-        part: "id",
+        part: "snippet",
         forHandle: value,
         key: apiKey,
         fields: "items(id)",
@@ -222,7 +248,7 @@ async function resolveChannelId(apiKey, channelInput, { timeoutSeconds }) {
   }
 }
 
-async function fetchLiveVideoIds(apiKey, channelId, { maxResults, timeoutSeconds }) {
+async function fetchLiveVideoIdsViaSearch(apiKey, channelId, { maxResults, timeoutSeconds }) {
   const data = await apiGetJson(
     YOUTUBE_SEARCH_ENDPOINT,
     {
@@ -244,6 +270,140 @@ async function fetchLiveVideoIds(apiKey, channelId, { maxResults, timeoutSeconds
     if (typeof videoId === "string" && videoId) ids.push(videoId);
   }
   return ids;
+}
+
+async function fetchUploadsPlaylistId(apiKey, channelId, { timeoutSeconds }) {
+  const data = await apiGetJson(
+    YOUTUBE_CHANNELS_ENDPOINT,
+    {
+      part: "contentDetails",
+      id: channelId,
+      key: apiKey,
+      fields: "items(contentDetails(relatedPlaylists(uploads)))",
+    },
+    { timeoutSeconds }
+  );
+
+  const items = Array.isArray(data.items) ? data.items : [];
+  const uploads =
+    items[0] &&
+    items[0].contentDetails &&
+    items[0].contentDetails.relatedPlaylists &&
+    items[0].contentDetails.relatedPlaylists.uploads;
+  if (typeof uploads !== "string" || !uploads) {
+    throw new Error(`Could not determine uploads playlist for channel ${channelId}`);
+  }
+  return uploads;
+}
+
+async function fetchRecentVideoIdsFromUploadsPlaylist(
+  apiKey,
+  uploadsPlaylistId,
+  { scanLatest, timeoutSeconds }
+) {
+  const data = await apiGetJson(
+    YOUTUBE_PLAYLIST_ITEMS_ENDPOINT,
+    {
+      part: "contentDetails",
+      playlistId: uploadsPlaylistId,
+      maxResults: String(scanLatest),
+      key: apiKey,
+      fields: "items(contentDetails(videoId))",
+    },
+    { timeoutSeconds }
+  );
+
+  const items = Array.isArray(data.items) ? data.items : [];
+  const ids = [];
+  for (const item of items) {
+    const videoId = item && item.contentDetails ? item.contentDetails.videoId : null;
+    if (typeof videoId === "string" && videoId) ids.push(videoId);
+  }
+  return uniqueExactStrings(ids);
+}
+
+async function filterCurrentlyLiveVideoIds(apiKey, videoIds, { timeoutSeconds }) {
+  const ids = uniqueExactStrings(videoIds).slice(0, 50);
+  if (!ids.length) return [];
+
+  const data = await apiGetJson(
+    YOUTUBE_VIDEOS_ENDPOINT,
+    {
+      part: "snippet,liveStreamingDetails",
+      id: ids.join(","),
+      key: apiKey,
+      fields:
+        "items(id,snippet(liveBroadcastContent),liveStreamingDetails(actualStartTime,actualEndTime))",
+    },
+    { timeoutSeconds }
+  );
+
+  const items = Array.isArray(data.items) ? data.items : [];
+  const liveIds = [];
+  for (const item of items) {
+    const videoId = item && typeof item.id === "string" ? item.id : null;
+    if (!videoId) continue;
+
+    const liveBroadcastContent =
+      item &&
+      item.snippet &&
+      typeof item.snippet.liveBroadcastContent === "string"
+        ? item.snippet.liveBroadcastContent
+        : null;
+    const details = item && item.liveStreamingDetails ? item.liveStreamingDetails : null;
+
+    const isLiveBySnippet = liveBroadcastContent === "live";
+    const isLiveByDetails =
+      details &&
+      typeof details.actualStartTime === "string" &&
+      details.actualStartTime &&
+      (details.actualEndTime === undefined || details.actualEndTime === null);
+
+    if (isLiveBySnippet || isLiveByDetails) liveIds.push(videoId);
+  }
+  return uniqueExactStrings(liveIds);
+}
+
+async function fetchLiveVideoIdsViaUploads(
+  apiKey,
+  channelId,
+  {
+    scanLatest,
+    maxResults,
+    timeoutSeconds,
+    uploadsPlaylistIdByChannelId,
+    knownLiveVideoIdsByChannelId,
+  }
+) {
+  const uploadsCache =
+    uploadsPlaylistIdByChannelId instanceof Map ? uploadsPlaylistIdByChannelId : new Map();
+  const knownLiveCache =
+    knownLiveVideoIdsByChannelId instanceof Map ? knownLiveVideoIdsByChannelId : new Map();
+
+  const knownIds = knownLiveCache.get(channelId);
+  if (Array.isArray(knownIds) && knownIds.length) {
+    const stillLive = await filterCurrentlyLiveVideoIds(apiKey, knownIds, { timeoutSeconds });
+    if (stillLive.length) {
+      knownLiveCache.set(channelId, stillLive);
+      return stillLive.slice(0, maxResults);
+    }
+    knownLiveCache.set(channelId, []);
+  }
+
+  let uploadsPlaylistId = uploadsCache.get(channelId);
+  if (!uploadsPlaylistId) {
+    uploadsPlaylistId = await fetchUploadsPlaylistId(apiKey, channelId, { timeoutSeconds });
+    uploadsCache.set(channelId, uploadsPlaylistId);
+  }
+
+  const recentVideoIds = await fetchRecentVideoIdsFromUploadsPlaylist(apiKey, uploadsPlaylistId, {
+    scanLatest,
+    timeoutSeconds,
+  });
+  const liveIds = await filterCurrentlyLiveVideoIds(apiKey, recentVideoIds, { timeoutSeconds });
+
+  knownLiveCache.set(channelId, liveIds);
+  return liveIds.slice(0, maxResults);
 }
 
 function extractVideoIdFromUrlOrId(text) {
@@ -340,6 +500,8 @@ function printHelp() {
     `  --output <path>            Output file path (or set YOUTUBE_OUTPUT, default: ${DEFAULT_OUTPUT_FILE}; relative paths save next to this script)`,
     "  --env-file <path>          Optional .env file with YOUTUBE_API_KEY, YOUTUBE_CHANNELS, YOUTUBE_OUTPUT, YOUTUBE_INTERVAL_SECONDS",
     "  --max-results <n>          Max number of simultaneous live videos to save (default: 5)",
+    `  --scan-latest <n>          When not using --use-search, scan the latest N uploads (1-50, default: ${DEFAULT_SCAN_LATEST})`,
+    "  --use-search               Use search.list for discovery (very expensive in YouTube API quota)",
     "  --timeout-seconds <n>      HTTP timeout in seconds (default: 10)",
     "  --with-timestamp           Prefix saved lines with an ISO timestamp and a tab",
     "  --quiet                    Only print errors (useful for cron)",
@@ -357,6 +519,8 @@ function parseArgs(argv) {
     output: null,
     envFile: null,
     maxResults: 5,
+    scanLatest: null,
+    useSearch: null,
     timeoutSeconds: 10,
     withTimestamp: false,
     quiet: false,
@@ -389,6 +553,10 @@ function parseArgs(argv) {
     }
     if (arg === "--loop") {
       args.loop = true;
+      continue;
+    }
+    if (arg === "--use-search") {
+      args.useSearch = true;
       continue;
     }
 
@@ -424,6 +592,16 @@ function parseArgs(argv) {
       i = out.nextIndex;
       continue;
     }
+    if (arg === "--scan-latest" || arg.startsWith("--scan-latest=")) {
+      const out = takeValue(arg, i);
+      const n = Number.parseInt(out.value, 10);
+      if (!Number.isFinite(n) || n <= 0 || n > 50) {
+        throw new Error("--scan-latest must be an integer between 1 and 50");
+      }
+      args.scanLatest = n;
+      i = out.nextIndex;
+      continue;
+    }
     if (arg === "--timeout-seconds" || arg.startsWith("--timeout-seconds=")) {
       const out = takeValue(arg, i);
       const n = Number.parseFloat(out.value);
@@ -447,11 +625,20 @@ function parseArgs(argv) {
   return args;
 }
 
-async function runOnce(args) {
+async function runOnce(args, state) {
   const apiKey = args.apiKey || process.env.YOUTUBE_API_KEY;
   const channelInputs = getChannelInputs(args);
   const rawOutputPath = args.output || process.env.YOUTUBE_OUTPUT || DEFAULT_OUTPUT_FILE;
   const outputPath = resolveOutputPath(rawOutputPath);
+  const channelIdByInput = state && state.channelIdByInput instanceof Map ? state.channelIdByInput : new Map();
+  const uploadsPlaylistIdByChannelId =
+    state && state.uploadsPlaylistIdByChannelId instanceof Map
+      ? state.uploadsPlaylistIdByChannelId
+      : new Map();
+  const knownLiveVideoIdsByChannelId =
+    state && state.knownLiveVideoIdsByChannelId instanceof Map
+      ? state.knownLiveVideoIdsByChannelId
+      : new Map();
 
   if (!apiKey) {
     console.error("Missing API key. Pass --api-key or set YOUTUBE_API_KEY.");
@@ -462,17 +649,44 @@ async function runOnce(args) {
     return 2;
   }
 
+  let scanLatest = args.scanLatest;
+  if (scanLatest === null) scanLatest = getEnvInt("YOUTUBE_SCAN_LATEST");
+  if (scanLatest === null) scanLatest = DEFAULT_SCAN_LATEST;
+  if (!Number.isFinite(scanLatest) || scanLatest <= 0 || scanLatest > 50) {
+    console.error("YOUTUBE_SCAN_LATEST must be an integer between 1 and 50.");
+    return 2;
+  }
+
+  let useSearch = args.useSearch;
+  if (useSearch === null) {
+    const envUseSearch = getEnvBool("YOUTUBE_USE_SEARCH");
+    useSearch = envUseSearch === null ? false : envUseSearch;
+  }
+
   const allLiveVideoIds = new Set();
   const errors = [];
   for (const channelInput of channelInputs) {
     try {
-      const channelId = await resolveChannelId(apiKey, channelInput, {
-        timeoutSeconds: args.timeoutSeconds,
-      });
-      const liveVideoIds = await fetchLiveVideoIds(apiKey, channelId, {
-        maxResults: args.maxResults,
-        timeoutSeconds: args.timeoutSeconds,
-      });
+      let channelId = channelIdByInput.get(channelInput);
+      if (!channelId) {
+        channelId = await resolveChannelId(apiKey, channelInput, {
+          timeoutSeconds: args.timeoutSeconds,
+        });
+        channelIdByInput.set(channelInput, channelId);
+      }
+
+      const liveVideoIds = useSearch
+        ? await fetchLiveVideoIdsViaSearch(apiKey, channelId, {
+            maxResults: args.maxResults,
+            timeoutSeconds: args.timeoutSeconds,
+          })
+        : await fetchLiveVideoIdsViaUploads(apiKey, channelId, {
+            scanLatest,
+            maxResults: args.maxResults,
+            timeoutSeconds: args.timeoutSeconds,
+            uploadsPlaylistIdByChannelId,
+            knownLiveVideoIdsByChannelId,
+          });
       for (const id of liveVideoIds) allLiveVideoIds.add(id);
     } catch (err) {
       if (channelInputs.length === 1) throw err;
@@ -528,9 +742,15 @@ async function main(argv) {
     }
   }
 
+  const state = {
+    channelIdByInput: new Map(),
+    uploadsPlaylistIdByChannelId: new Map(),
+    knownLiveVideoIdsByChannelId: new Map(),
+  };
+
   if (!args.loop) {
     try {
-      return await runOnce(args);
+      return await runOnce(args, state);
     } catch (err) {
       console.error(err instanceof Error ? err.message : String(err));
       return 1;
@@ -545,7 +765,7 @@ async function main(argv) {
   if (!args.quiet) console.log(`Polling every ${intervalSeconds} seconds...`);
   while (true) {
     try {
-      await runOnce(args);
+      await runOnce(args, state);
     } catch (err) {
       console.error(err instanceof Error ? err.message : String(err));
     }
