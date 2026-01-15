@@ -1,4 +1,7 @@
 .env
 saved_live_links.txt
+*.playlist_queue.*
+*.playlist_state.json
+.youtube_oauth_tokens.json
 node_modules/
 bun.lockb
